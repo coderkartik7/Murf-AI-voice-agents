@@ -286,13 +286,15 @@ async function processEchoAudio(audioBlob) {
             body: formData
         });
         
-        console.log("Response status:", response.status);
-        if(!response.ok){
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
+        // Parse response even for error status codes
         const data = await response.json();
         console.log("Echo response:", data);
+        
+        if (!response.ok) {
+            // Use the server's error message if available
+            const serverError = data.detail || `HTTP error! status: ${response.status}`;
+            throw new Error(serverError);
+        }
         
         if (data.success) {
             console.log("Echo processing successful!");
@@ -322,21 +324,28 @@ async function processEchoAudio(audioBlob) {
             
         } else {
             console.error("Echo processing failed:", data.error);
-            if (status) {
-                status.textContent = `❌ Error: ${data.error || 'Echo processing failed'}`;
-                status.className = 'status error';
-            }
+            // Use the server's error message
+            throw new Error(data.error || 'Echo processing failed');
         }
         
     } catch (error) {
         console.error('Echo processing error:', error);
+        
+        let errorMessage = 'Network error. Please try again.';
+        
+        // Check for specific error messages
+        if (error.message.includes('No speech detected')) {
+            errorMessage = '🎤 No speech detected in your recording. Please speak clearly and try again.';
+        } else if (error.message.includes('Transcription failed')) {
+            errorMessage = '🎤 Could not understand your speech. Please speak more clearly and try again.';
+        }
+        
         if (status) {
-            status.textContent = `❌ Network error: ${error.message}`;
+            status.textContent = `❌ ${errorMessage}`;
             status.className = 'status error';
         }
     }
 }
-
 function showEchoDownload(transcribedText, audioUrl) {
     // Create or update the download area in the Echo Bot container
     const audioContainer = document.querySelector('.audio-container');
@@ -689,12 +698,15 @@ async function processChatAudio(audioBlob) {
             body: formData
         });
         
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
+        // Parse response even for error status codes
         const data = await response.json();
         console.log("Chat agent response:", data);
+        
+        if (!response.ok) {
+            // Use the server's error message if available
+            const serverError = data.detail || `HTTP error! status: ${response.status}`;
+            throw new Error(serverError);
+        }
         
         if (data.success) {
             // Hide thinking dots
@@ -729,7 +741,8 @@ async function processChatAudio(audioBlob) {
             
         } else {
             console.error("Chat agent failed:", data.error);
-            handleChatError(new Error(data.error || 'Chat processing failed'));
+            // Use the server's error message
+            throw new Error(data.error || 'Chat processing failed');
         }
         
     } catch (error) {
@@ -778,7 +791,12 @@ function handleChatError(error) {
     
     let errorMessage = 'Something went wrong. Please try again.';
     
-    if (error.message.includes('401')) {
+    // Check for specific error messages first
+    if (error.message.includes('No speech detected')) {
+        errorMessage = '🎤 No speech detected in your recording. Please speak clearly and try again.';
+    } else if (error.message.includes('Transcription failed')) {
+        errorMessage = '🎤 Could not understand your speech. Please speak more clearly and try again.';
+    } else if (error.message.includes('401')) {
         errorMessage = 'API key error. Please check your configuration.';
     } else if (error.message.includes('429')) {
         errorMessage = 'Rate limit exceeded. Please wait a moment and try again.';
