@@ -1,129 +1,31 @@
-// Get DOM elements for TTS
-const form = document.getElementById('ttsForm');
-const textInput = document.getElementById('textInput');
-const generateBtn = document.getElementById('generateBtn');
-const resultArea = document.getElementById('resultArea');
-const charCount = document.getElementById('charCount');
+console.log("Enhanced AI Chat Agent with Session Management loaded");
 
-// TTS Character counter functionality
-if (textInput && charCount) {
-    textInput.addEventListener('input', function() {
-        const count = this.value.length;
-        charCount.textContent = count;
-        
-        // Change color when approaching limit
-        if (count > 4500) {
-            charCount.style.color = '#dc354c';
-        } else {
-            charCount.style.color = 'inherit';
-        }
-    });
-}
-
-// TTS Form submission handler
-if (form) {
-    form.addEventListener('submit', async function(e) {
-        e.preventDefault();
-        
-        const text = textInput.value.trim();
-        
-        // Validate input
-        if (!text) {
-            showResult('Please enter some text!', 'error');
-            return;
-        }
-        
-        // Show loading state
-        generateBtn.disabled = true;
-        generateBtn.textContent = '🔄 Generating...';
-        showLoading();
-        
-        try {
-            // Make API request
-            const response = await fetch('/api/tts', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    text: text,
-                    style: "Inspirational"
-                })
-            });
-            
-            const data = await response.json();
-            
-            // Handle response
-            if (data.success) {
-                showSuccess(data.audio_url, data.message);
-            } else {
-                showResult(data.error || 'Failed to generate speech', 'error');
-            }
-            
-        } catch (error) {
-            console.error('Error:', error);
-            showResult('Network error. Please try again.', 'error');
-        } finally {
-            // Reset button state
-            generateBtn.disabled = false;
-            generateBtn.textContent = '🎵 Generate Speech';
-        }
-    });
-}
-
-// TTS Show loading animation
-function showLoading() {
-    if (resultArea) {
-        resultArea.style.display = 'flex';
-        resultArea.innerHTML = `
-            <div class="loading"></div>
-            <p>Generating your speech... Please wait</p>
-        `;
-    }
-}
-
-// TTS Show result message
-function showResult(message, type) {
-    if (resultArea) {
-        resultArea.style.display = 'flex';
-        const className = type === 'error' ? 'error-message' : 'success-message';
-        resultArea.innerHTML = `<p class="${className}">${message}</p>`;
-    }
-}
-
-// TTS Show success with audio player and download link
-function showSuccess(audioUrl, message) {
-    if (resultArea) {
-        resultArea.style.display = 'flex';
-        resultArea.innerHTML = `
-            <p class="success-message">✅ ${message}</p>
-            <audio controls>
-                <source src="${audioUrl}" type="audio/mpeg">
-                Your browser does not support the audio element.
-            </audio>
-            <a href="${audioUrl}" download="generated-speech.mp3" class="download-btn">
-                📥 Download Audio
-            </a>
-        `;
-    }
-}
-
-// =============================================================================
-// ECHO BOT V2 FUNCTIONALITY - Now with Transcription + TTS
-// =============================================================================
-
-console.log("Echo Bot v2 script loaded");
-
-// Echo Bot variables
+// Variables
 let mediaRecorder;
 let audioChunks = [];
 let isRecording = false;
+let chatMediaRecorder;
+let chatAudioChunks = [];
+let chatIsRecording = false;
+let currentSessionId = null;
+let autoRecordingEnabled = false;
+let isWaitingForResponse = false;
 
-// Get Echo Bot DOM elements
+// Get DOM elements
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const status = document.getElementById('status');
 const audioPlayback = document.getElementById('audioPlayback');
+const llmStartBtn = document.getElementById('llmStartBtn');
+const llmStopBtn = document.getElementById('llmStopBtn');
+const llmStatus = document.getElementById('llmStatus');
+const llmAudioPlayback = document.getElementById('llmAudioPlayback');
+const chatContainer = document.getElementById('chatContainer');
+const currentSessionIdDisplay = document.getElementById('currentSessionId');
+const newSessionBtn = document.getElementById('newSessionBtn');
+const clearChatBtn = document.getElementById('clearChatBtn');
+const disableThinkingCheckbox = document.getElementById('disableThinking');
+const thinkingDots = document.getElementById('thinkingDots');
 
 // Log element status
 console.log("Echo Bot elements:", {
@@ -131,6 +33,16 @@ console.log("Echo Bot elements:", {
     stopBtn: !!stopBtn,
     status: !!status,
     audioPlayback: !!audioPlayback,
+    llmStartBtn: !!llmStartBtn,
+    llmStopBtn: !!llmStopBtn,
+    llmStatus: !!llmStatus,
+    llmAudioPlayback: !!llmAudioPlayback,
+    chatContainer: !!chatContainer,
+    currentSessionIdDisplay: !!currentSessionIdDisplay,
+    newSessionBtn: !!newSessionBtn,
+    clearChatBtn: !!clearChatBtn,
+    disableThinkingCheckbox: !!disableThinkingCheckbox,
+    thinkingDots: !!thinkingDots
 });
 
 // Initialize Echo Bot
@@ -156,7 +68,7 @@ function initEchoBot() {
     }
 }
 
-// Echo Bot start recording function
+// Start recording function
 async function startRecording() {
     console.log("Start recording called");
     
@@ -239,7 +151,7 @@ async function startRecording() {
     }
 }
 
-// Echo Bot stop recording function
+// Stop recording function
 function stopRecording() {
     console.log("Stop recording called");
     
@@ -264,152 +176,6 @@ function stopRecording() {
         }
     }
 }
-
-// Process audio with the /tts/echo endpoint
-async function processEchoAudio(audioBlob) {
-    try {
-        // Update status to show upload in progress
-        if (status) {
-            status.textContent = '🎯 Transcribing your speech...';
-            status.className = 'status processing';
-        }
-        
-        // Create FormData for file upload
-        const formData = new FormData();
-        formData.append('audio_file', audioBlob, 'echo_recording.webm');
-        formData.append('style', 'Inspirational');
-        
-        // Call the echo endpoint
-        console.log("Calling /tts/echo endpoint...")
-        const response = await fetch('/tts/echo', {
-            method: 'POST',
-            body: formData
-        });
-        
-        // Parse response even for error status codes
-        const data = await response.json();
-        console.log("Echo response:", data);
-        
-        if (!response.ok) {
-            // Use the server's error message if available
-            const serverError = data.detail || `HTTP error! status: ${response.status}`;
-            throw new Error(serverError);
-        }
-        
-        if (data.success) {
-            console.log("Echo processing successful!");
-            // Update status to show transcription result
-            if (status) {
-                status.textContent = `🎤 You said: "${data.transcribed_text}"`;
-                status.className = 'status ready';
-            }
-            
-            // Set up audio playback with the AI-generated voice
-            if (audioPlayback && data.audio_url) {
-                audioPlayback.src = data.audio_url;
-                audioPlayback.style.display = 'block';
-                console.log("Audio playback updated with AI voice");
-                
-                // Add some visual feedback
-                setTimeout(() => {
-                    if (status) {
-                        status.textContent = `✅ ${data.message} - Playing back in AI voice!`;
-                        status.className = 'status ready';
-                    }
-                }, 500);
-            }
-
-            // Show download option in Echo Bot container
-            showEchoDownload(data.transcribed_text, data.audio_url);
-            
-        } else {
-            console.error("Echo processing failed:", data.error);
-            // Use the server's error message
-            throw new Error(data.error || 'Echo processing failed');
-        }
-        
-    } catch (error) {
-        console.error('Echo processing error:', error);
-        
-        let errorMessage = 'Network error. Please try again.';
-        
-        // Check for specific error messages
-        if (error.message.includes('No speech detected')) {
-            errorMessage = '🎤 No speech detected in your recording. Please speak clearly and try again.';
-        } else if (error.message.includes('Transcription failed')) {
-            errorMessage = '🎤 Could not understand your speech. Please speak more clearly and try again.';
-        }
-        
-        if (status) {
-            status.textContent = `❌ ${errorMessage}`;
-            status.className = 'status error';
-        }
-    }
-}
-function showEchoDownload(transcribedText, audioUrl) {
-    // Create or update the download area in the Echo Bot container
-    const audioContainer = document.querySelector('.audio-container');
-    if (audioContainer) {
-        // Check if download area already exists
-        let downloadArea = document.getElementById('echoDownloadArea');
-        if (!downloadArea) {
-            downloadArea = document.createElement('div');
-            downloadArea.id = 'echoDownloadArea';
-            downloadArea.style.marginTop = '20px';
-            audioContainer.appendChild(downloadArea);
-        }
-        
-        downloadArea.innerHTML = `
-            <div style="text-align: center; padding: 15px; background: rgba(76, 175, 80, 0.1); border-radius: 10px; border: 1px solid rgba(76, 175, 80, 0.3);">
-                <p style="margin-bottom: 10px;"><strong>📝 Transcription:</strong></p>
-                <p style="font-style: italic; margin-bottom: 15px;">"${transcribedText}"</p>
-                <a href="${audioUrl}" download="echo-ai-voice.mp3" class="download-btn">
-                    📥 Download AI Voice
-                </a>
-            </div>
-        `;
-    }
-}
-
-// =============================================================================
-// ENHANCED AI CHAT AGENT WITH SESSION MANAGEMENT & AUTO-RECORDING
-// =============================================================================
-
-console.log("Enhanced AI Chat Agent with Session Management loaded");
-
-// Chat Agent variables
-let chatMediaRecorder;
-let chatAudioChunks = [];
-let chatIsRecording = false;
-let currentSessionId = null;
-let autoRecordingEnabled = false;
-let isWaitingForResponse = false;
-
-// Get Chat Agent DOM elements
-const llmStartBtn = document.getElementById('llmStartBtn');
-const llmStopBtn = document.getElementById('llmStopBtn');
-const llmStatus = document.getElementById('llmStatus');
-const llmAudioPlayback = document.getElementById('llmAudioPlayback');
-const chatContainer = document.getElementById('chatContainer');
-const currentSessionIdDisplay = document.getElementById('currentSessionId');
-const newSessionBtn = document.getElementById('newSessionBtn');
-const clearChatBtn = document.getElementById('clearChatBtn');
-const disableThinkingCheckbox = document.getElementById('disableThinking');
-const thinkingDots = document.getElementById('thinkingDots');
-
-// Log Chat Agent element status
-console.log("Chat Agent elements:", {
-    llmStartBtn: !!llmStartBtn,
-    llmStopBtn: !!llmStopBtn,
-    llmStatus: !!llmStatus,
-    llmAudioPlayback: !!llmAudioPlayback,
-    chatContainer: !!chatContainer,
-    currentSessionIdDisplay: !!currentSessionIdDisplay,
-    newSessionBtn: !!newSessionBtn,
-    clearChatBtn: !!clearChatBtn,
-    disableThinkingCheckbox: !!disableThinkingCheckbox,
-    thinkingDots: !!thinkingDots
-});
 
 // Session Management Functions
 function generateSessionId() {
@@ -880,8 +646,6 @@ window.voiceAgentUtils = {
         }
     }
 };
-
-console.log("🎉 Enhanced AI Voice Agents with Session Management loaded successfully!");
 console.log("💡 Try: voiceAgentUtils.getCurrentSession() to check current session");
 console.log("💡 Try: voiceAgentUtils.createNewSession() to start fresh");
 console.log("💡 Try: voiceAgentUtils.exportChatHistory() to download chat history");
