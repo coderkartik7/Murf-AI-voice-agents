@@ -1,385 +1,459 @@
-console.log("Modern AI Conversational Agent loaded");
+// test-streaming.js
+console.log("Audio Streaming Test Client loaded");
 
-// Variables
-let mediaRecorder;
-let audioChunks = [];
-let isRecording = false;
+// Global variables
+let audioWebSocket = null;
+let mediaRecorder = null;
 let currentSessionId = null;
-let isWaitingForResponse = false;
-let conversationActive = false;
+let currentStreamId = null;
+let isRecording = false;
+let isStreaming = false;
+let streamStartTime = null;
+let chunksSent = 0;
+let bytesSent = 0;
+let statsInterval = null;
 
-// Get DOM elements
-const recordBtn = document.getElementById('recordBtn');
-const stopConversationBtn = document.getElementById('stopConversationBtn');
-const chatArea = document.getElementById('chatArea');
-const statusMessage = document.getElementById('statusMessage');
-const currentSessionIdDisplay = document.getElementById('currentSessionId');
-const newSessionBtn = document.getElementById('newSessionBtn');
-const userNameInput = document.getElementById('userNameInput');
-const audioPlayback = document.getElementById('audioPlayback');
+// DOM elements
+const elements = {
+    sessionId: document.getElementById('sessionId'),
+    wsStatus: document.getElementById('wsStatus'),
+    streamId: document.getElementById('streamId'),
+    recordingStatus: document.getElementById('recordingStatus'),
+    currentStatus: document.getElementById('currentStatus'),
+    logContainer: document.getElementById('logContainer'),
+    chunksSent: document.getElementById('chunksSent'),
+    bytesSent: document.getElementById('bytesSent'),
+    streamDuration: document.getElementById('streamDuration'),
+    dataRate: document.getElementById('dataRate'),
+    
+    connectBtn: document.getElementById('connectBtn'),
+    disconnectBtn: document.getElementById('disconnectBtn'),
+    recordBtn: document.getElementById('recordBtn'),
+    stopBtn: document.getElementById('stopBtn'),
+    streamInfoBtn: document.getElementById('streamInfoBtn'),
+    clearLogBtn: document.getElementById('clearLogBtn')
+};
 
-// Session Management
-function generateSessionId() {
-    return 'session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-}
-
-function getSessionIdFromURL() {
-    const urlParams = new URLSearchParams(window.location.search);
-    return urlParams.get('session_id');
-}
-
-function setSessionIdInURL(sessionId) {
-    const url = new URL(window.location);
-    url.searchParams.set('session_id', sessionId);
-    window.history.replaceState({}, '', url);
-}
-
+// Initialize session
 function initializeSession() {
-    let sessionId = getSessionIdFromURL();
-    
-    if (!sessionId) {
-        sessionId = generateSessionId();
-        setSessionIdInURL(sessionId);
-    }
-    
-    currentSessionId = sessionId;
-    
-    if (currentSessionIdDisplay) {
-        currentSessionIdDisplay.textContent = sessionId;
-    }
-    
-    // Load existing chat history
-    loadChatHistory(sessionId);
-    
-    console.log("Session initialized:", sessionId);
+    currentSessionId = 'test-session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+    elements.sessionId.textContent = currentSessionId;
+    updateStatus("Session initialized. Click 'Connect WebSocket' to begin.");
+    logMessage('info', 'Session initialized: ' + currentSessionId);
 }
 
-async function loadChatHistory(sessionId) {
-    try {
-        const response = await fetch(`/agent/chat/${sessionId}/history`);
-        const data = await response.json();
+// Update status display
+function updateStatus(message, type = 'info') {
+    elements.currentStatus.textContent = message;
+    elements.currentStatus.style.borderLeftColor = getStatusColor(type);
+    logMessage(type, message);
+}
+
+function getStatusColor(type) {
+    const colors = {
+        'info': '#2196f3',
+        'success': '#4caf50',
+        'error': '#f44336',
+        'warning': '#ff9800'
+    };
+    return colors[type] || '#2196f3';
+}
+
+// Logging functions
+function logMessage(type, message) {
+    const logEntry = document.createElement('div');
+    logEntry.className = `log-entry log-${type}`;
+    
+    const timestamp = new Date().toLocaleTimeString();
+    logEntry.innerHTML = `
+        <span class="log-timestamp">[${timestamp}]</span>
+        <span class="log-message">${message}</span>
+    `;
+    
+    elements.logContainer.appendChild(logEntry);
+    elements.logContainer.scrollTop = elements.logContainer.scrollHeight;
+    
+    console.log(`[${type.toUpperCase()}] ${message}`);
+}
+
+function clearLog() {
+    elements.logContainer.innerHTML = '';
+    logMessage('info', 'Log cleared');
+}
+
+// WebSocket functions
+function connectWebSocket() {
+    if (audioWebSocket && audioWebSocket.readyState === WebSocket.OPEN) {
+        logMessage('warning', 'WebSocket already connected');
+        return;
+    }
+    
+    const wsUrl = `ws://localhost:8000/ws/audio/${currentSessionId}`;
+    logMessage('info', `Connecting to WebSocket: ${wsUrl}`);
+    
+    elements.wsStatus.textContent = 'Connecting...';
+    elements.wsStatus.className = 'status-connecting';
+    updateStatus("Connecting to WebSocket server...", 'info');
+    
+    audioWebSocket = new WebSocket(wsUrl);
+    
+    audioWebSocket.onopen = function(event) {
+        logMessage('success', 'WebSocket connected successfully');
+        elements.wsStatus.textContent = 'Connected';
+        elements.wsStatus.className = 'status-connected';
+        updateStatus("WebSocket connected. Ready to stream audio.", 'success');
         
-        if (data.success && data.chat_history) {
-            // Clear current chat display (except status)
-            const statusEl = document.getElementById('statusMessage');
-            chatArea.innerHTML = '';
-            chatArea.appendChild(statusEl);
-            
-            // Display chat history
-            data.chat_history.forEach(message => {
-                addChatMessage(message.role === 'user' ? 'user' : 'ai', message.content, false);
-            });
-            
-            console.log(`Loaded ${data.chat_history.length} messages for session ${sessionId}`);
+        // Enable/disable buttons
+        elements.connectBtn.disabled = true;
+        elements.disconnectBtn.disabled = false;
+        elements.recordBtn.disabled = false;
+        elements.streamInfoBtn.disabled = false;
+    };
+    
+    audioWebSocket.onmessage = function(event) {
+        try {
+            const data = JSON.parse(event.data);
+            handleWebSocketMessage(data);
+        } catch (error) {
+            logMessage('info', `WebSocket message: ${event.data}`);
         }
-    } catch (error) {
-        console.error('Error loading chat history:', error);
+    };
+    
+    audioWebSocket.onclose = function(event) {
+        logMessage('warning', `WebSocket connection closed (code: ${event.code})`);
+        elements.wsStatus.textContent = 'Disconnected';
+        elements.wsStatus.className = 'status-disconnected';
+        updateStatus("WebSocket disconnected", 'warning');
+        
+        // Reset state
+        audioWebSocket = null;
+        isStreaming = false;
+        currentStreamId = null;
+        elements.streamId.textContent = 'None';
+        
+        // Enable/disable buttons
+        elements.connectBtn.disabled = false;
+        elements.disconnectBtn.disabled = true;
+        elements.recordBtn.disabled = true;
+        elements.stopBtn.disabled = true;
+        elements.streamInfoBtn.disabled = true;
+        
+        if (isRecording) {
+            stopRecording();
+        }
+    };
+    
+    audioWebSocket.onerror = function(error) {
+        logMessage('error', `WebSocket error: ${error.message || 'Connection failed'}`);
+        updateStatus("WebSocket connection error", 'error');
+    };
+}
+
+function disconnectWebSocket() {
+    if (audioWebSocket) {
+        if (isRecording) {
+            stopRecording();
+        }
+        
+        logMessage('info', 'Disconnecting WebSocket');
+        audioWebSocket.close();
     }
 }
 
-async function createNewSession() {
-    const newSessionId = generateSessionId();
-    currentSessionId = newSessionId;
-    setSessionIdInURL(newSessionId);
+function handleWebSocketMessage(data) {
+    logMessage('info', `WebSocket message: ${data.type}`);
     
-    if (currentSessionIdDisplay) {
-        currentSessionIdDisplay.textContent = newSessionId;
-    }
-    
-    // Clear chat area and reset status
-    const statusEl = document.getElementById('statusMessage');
-    chatArea.innerHTML = '';
-    chatArea.appendChild(statusEl);
-    
-    updateStatus("New session created! Ready to chat.", "ready");
-    
-    // Reset conversation state
-    conversationActive = false;
-    stopConversationBtn.disabled = true;
-    
-    console.log("New session created:", newSessionId);
-}
-
-// UI Update Functions
-function updateStatus(message, type = "ready") {
-    if (statusMessage) {
-        statusMessage.textContent = message;
-        statusMessage.className = `status-message ${type}`;
-    }
-}
-
-function addChatMessage(type, text, animate = true) {
-    const messageDiv = document.createElement('div');
-    messageDiv.className = `chat-message ${type}-message`;
-    if (animate) messageDiv.style.opacity = '0';
-    
-    const userName = userNameInput.value || 'User';
-    const displayName = type === 'user' ? userName : 'AI Assistant';
-    
-    messageDiv.innerHTML = `<strong>${displayName}:</strong> ${text}`;
-    
-    chatArea.appendChild(messageDiv);
-    
-    // Animate in
-    if (animate) {
-        setTimeout(() => {
-            messageDiv.style.opacity = '1';
-        }, 100);
-    }
-    
-    // Scroll to bottom
-    chatArea.scrollTop = chatArea.scrollHeight;
-}
-
-function showThinkingDots() {
-    const thinkingDiv = document.createElement('div');
-    thinkingDiv.className = 'thinking-dots';
-    thinkingDiv.id = 'thinkingDots';
-    thinkingDiv.innerHTML = '<span></span><span></span><span></span>';
-    chatArea.appendChild(thinkingDiv);
-    chatArea.scrollTop = chatArea.scrollHeight;
-}
-
-function hideThinkingDots() {
-    const thinkingDots = document.getElementById('thinkingDots');
-    if (thinkingDots) {
-        thinkingDots.remove();
+    switch(data.type) {
+        case 'audio_welcome':
+            logMessage('success', data.message);
+            break;
+            
+        case 'stream_started':
+            currentStreamId = data.stream_id;
+            isStreaming = true;
+            streamStartTime = Date.now();
+            elements.streamId.textContent = currentStreamId;
+            logMessage('success', `Audio streaming started: ${currentStreamId}`);
+            updateStatus("Audio streaming active. Recording will be saved to server.", 'success');
+            
+            // Start statistics updates
+            startStatsUpdates();
+            break;
+            
+        case 'stream_stopped':
+            const result = data.result;
+            isStreaming = false;
+            currentStreamId = null;
+            streamStartTime = null;
+            elements.streamId.textContent = 'None';
+            
+            logMessage('success', `Stream stopped: ${result.filename}`);
+            logMessage('data', `Stats: ${result.chunks_received} chunks, ${result.total_bytes} bytes`);
+            updateStatus(`Stream saved to: ${result.filename}`, 'success');
+            
+            // Stop statistics updates
+            stopStatsUpdates();
+            break;
+            
+        case 'error':
+            logMessage('error', `Server error: ${data.message}`);
+            updateStatus(`Error: ${data.message}`, 'error');
+            break;
+            
+        case 'stream_info':
+            if (data.stream_info) {
+                const info = data.stream_info;
+                logMessage('data', `Stream info: ${info.chunks_received} chunks, ${info.total_bytes} bytes`);
+            } else {
+                logMessage('info', data.message || 'No active stream');
+            }
+            break;
+            
+        default:
+            logMessage('info', `Unknown message type: ${data.type}`);
     }
 }
 
-// Recording Functions
+// Audio recording functions
 async function startRecording() {
+    if (isRecording) {
+        logMessage('warning', 'Already recording');
+        return;
+    }
+    
+    if (!audioWebSocket || audioWebSocket.readyState !== WebSocket.OPEN) {
+        logMessage('error', 'WebSocket not connected');
+        updateStatus("Cannot start recording: WebSocket not connected", 'error');
+        return;
+    }
+    
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ 
+        logMessage('info', 'Requesting microphone access...');
+        
+        // Get microphone access
+        const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 echoCancellation: true,
                 noiseSuppression: true,
                 sampleRate: 44100
-            } 
+            }
         });
-
+        
+        logMessage('success', 'Microphone access granted');
+        
         // Check for supported MIME types
         let mimeType = 'audio/webm;codecs=opus';
         if (!MediaRecorder.isTypeSupported(mimeType)) {
             mimeType = 'audio/webm';
             if (!MediaRecorder.isTypeSupported(mimeType)) {
                 mimeType = 'audio/mp4';
-                    if (!MediaRecorder.isTypeSupported(mimeType)) {
-                        mimeType = ''; // Use default
-                    }
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    mimeType = '';
+                }
             }
         }
-
+        
+        logMessage('info', `Using MIME type: ${mimeType || 'default'}`);
+        
+        // Create MediaRecorder
         mediaRecorder = new MediaRecorder(stream, mimeType ? { 
             mimeType: mimeType,
             audioBitsPerSecond: 128000 
         } : {});
-
-        console.log("Using MIME type:", mimeType || "default");
-
-        audioChunks = [];
-        isRecording = true;
-        conversationActive = true;
-        stopConversationBtn.disabled = false;
-
-        mediaRecorder.ondataavailable = (event) => {
-        console.log("Audio data received:", event.data.size, "bytes");
-            if (event.data.size > 0) {
-                audioChunks.push(event.data);
+        
+        // Reset statistics
+        chunksSent = 0;
+        bytesSent = 0;
+        updateStatsDisplay();
+        
+        // Handle data available
+        mediaRecorder.ondataavailable = function(event) {
+            if (event.data.size > 0 && audioWebSocket && audioWebSocket.readyState === WebSocket.OPEN && isStreaming) {
+                // Convert Blob to ArrayBuffer and send
+                event.data.arrayBuffer().then(buffer => {
+                    audioWebSocket.send(buffer);
+                    
+                    // Update statistics
+                    chunksSent++;
+                    bytesSent += buffer.byteLength;
+                    updateStatsDisplay();
+                    
+                    logMessage('data', `Sent chunk ${chunksSent}: ${buffer.byteLength} bytes`);
+                }).catch(error => {
+                    logMessage('error', `Error sending audio chunk: ${error.message}`);
+                });
             }
         };
-
-        mediaRecorder.onstop = async () => {
-            const audioBlob = new Blob(audioChunks, { type: mimeType || 'audio/webm' });
-            console.log("Audio blob created:", audioBlob.size, "bytes");
-    
-            if (audioBlob.size < 1000) {  // Less than 1KB likely means no audio
-                updateStatus('⚠️ Recording too short. Please speak for longer.', 'error');
-                isWaitingForResponse = false;
-                return;
-            }
-    
-            await processAudio(audioBlob);
+        
+        mediaRecorder.onstop = function() {
+            logMessage('info', 'MediaRecorder stopped');
             stream.getTracks().forEach(track => track.stop());
+            
+            // Stop server-side stream if still active
+            if (isStreaming && audioWebSocket && audioWebSocket.readyState === WebSocket.OPEN) {
+                const stopCommand = { type: "stop_stream" };
+                audioWebSocket.send(JSON.stringify(stopCommand));
+                logMessage('info', 'Sent stop_stream command to server');
+            }
         };
-        mediaRecorder.start(100);
-
+        
+        // Start recording
+        mediaRecorder.start(100); // Send data every 100ms
+        isRecording = true;
+        
+        // Start server-side streaming
+        const startCommand = { type: "start_stream" };
+        audioWebSocket.send(JSON.stringify(startCommand));
+        logMessage('info', 'Sent start_stream command to server');
+        
         // Update UI
-        recordBtn.classList.add('recording');
-        recordBtn.innerHTML = '⏹️';
-        updateStatus('🎙️ Recording your message... Speak clearly!', 'recording');
-
+        elements.recordBtn.textContent = '🔴 Recording...';
+        elements.recordBtn.classList.add('recording');
+        elements.recordBtn.disabled = true;
+        elements.stopBtn.disabled = false;
+        elements.recordingStatus.textContent = 'Recording';
+        elements.recordingStatus.style.color = '#f44336';
+        
+        updateStatus("Recording started. Audio chunks are being streamed to server.", 'success');
+        
     } catch (error) {
-        console.error('Error accessing microphone:', error);
-        updateStatus(`Error: ${error.message}`, 'error');
+        logMessage('error', `Failed to start recording: ${error.message}`);
+        updateStatus(`Recording failed: ${error.message}`, 'error');
     }
 }
 
 function stopRecording() {
-    if (mediaRecorder && isRecording) {
+    if (!isRecording) {
+        logMessage('warning', 'Not currently recording');
+        return;
+    }
+    
+    logMessage('info', 'Stopping recording...');
+    
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
         mediaRecorder.stop();
-        isRecording = false;
-        isWaitingForResponse = true;
+    }
+    
+    isRecording = false;
+    
+    // Update UI
+    elements.recordBtn.textContent = '🎙️ Start Recording';
+    elements.recordBtn.classList.remove('recording');
+    elements.recordBtn.disabled = false;
+    elements.stopBtn.disabled = true;
+    elements.recordingStatus.textContent = 'Stopped';
+    elements.recordingStatus.style.color = '#fff';
+    
+    updateStatus("Recording stopped. Processing final chunks...", 'info');
+}
 
-        // Update UI
-        recordBtn.classList.remove('recording');
-        recordBtn.innerHTML = '🎙️';
-        updateStatus('Processing your message...', 'processing');
-        showThinkingDots();
+function getStreamInfo() {
+    if (audioWebSocket && audioWebSocket.readyState === WebSocket.OPEN) {
+        const infoCommand = { type: "stream_info" };
+        audioWebSocket.send(JSON.stringify(infoCommand));
+        logMessage('info', 'Requested stream info from server');
+    } else {
+        logMessage('warning', 'WebSocket not connected');
     }
 }
 
-function stopConversation() {
-    conversationActive = false;
-    stopConversationBtn.disabled = true;
-    
-    if (isRecording) {
-        stopRecording();
+// Statistics functions
+function startStatsUpdates() {
+    if (statsInterval) {
+        clearInterval(statsInterval);
     }
     
-    updateStatus('Conversation stopped. Click microphone to start again.', 'ready');
-    console.log('Conversation stopped by user');
+    statsInterval = setInterval(updateStatsDisplay, 500);
 }
 
-// Process audio with backend
-async function processAudio(audioBlob) {
-    try {
-        if (!currentSessionId) {
-            throw new Error('No active session');
-        }
-        
-        const formData = new FormData();
-        formData.append('audio_file', audioBlob, 'chat_query.webm');
-        formData.append('model', 'gemini-2.0-flash-exp');
-        
-        updateStatus('🤔 AI is thinking...', 'processing');
-        
-        console.log(`Calling /agent/chat/${currentSessionId} endpoint...`);
-        const response = await fetch(`/agent/chat/${currentSessionId}`, {
-            method: 'POST',
-            body: formData
-        });
-        
-        const data = await response.json();
-        console.log("Chat agent response:", data);
-        
-        if (!response.ok) {
-            const serverError = data.detail || `HTTP error! status: ${response.status}`;
-            throw new Error(serverError);
-        }
-        
-        if (data.success) {
-            hideThinkingDots();
-            
-            // Add messages to chat display
-            addChatMessage('user', data.transcribed_text);
-            addChatMessage('ai', data.llm_response);
-            
-            updateStatus('✅ Response ready! Listen below 👇', 'ready');
-            
-            // Set up audio playback
-            if (audioPlayback && data.audio_url) {
-                audioPlayback.src = data.audio_url;
-                audioPlayback.style.display = 'block';
-                
-                // Auto-play the response
-                setTimeout(() => {
-                    audioPlayback.play().catch(e => {
-                        console.log("Auto-play prevented by browser");
-                    });
-                }, 500);
-            }
-            
-            isWaitingForResponse = false;
-            
-        } else {
-            console.error("Chat agent failed:", data.error);
-            throw new Error(data.error || 'Chat processing failed');
-        }
-        
-    } catch (error) {
-        handleError(error);
+function stopStatsUpdates() {
+    if (statsInterval) {
+        clearInterval(statsInterval);
+        statsInterval = null;
     }
 }
 
-function handleError(error) {
-    console.error('Error:', error);
-    hideThinkingDots();
+function updateStatsDisplay() {
+    elements.chunksSent.textContent = chunksSent;
+    elements.bytesSent.textContent = formatBytes(bytesSent);
     
-    let errorMessage = 'Something went wrong. Please try again.';
-    
-    if (error.message.includes('No speech detected')) {
-        errorMessage = '🎤 No speech detected. Please speak clearly and try again.';
-    } else if (error.message.includes('Transcription failed')) {
-        errorMessage = '🎤 Could not understand your speech. Please try again.';
-    } else if (error.message.includes('401')) {
-        errorMessage = 'API key error. Please check configuration.';
-    } else if (error.message.includes('429')) {
-        errorMessage = 'Rate limit exceeded. Please wait and try again.';
-    } else if (error.message.includes('500')) {
-        errorMessage = 'Server error. Please try again later.';
+    if (streamStartTime) {
+        const duration = (Date.now() - streamStartTime) / 1000;
+        elements.streamDuration.textContent = formatDuration(duration);
+        
+        const rate = duration > 0 ? (bytesSent / duration / 1024) : 0;
+        elements.dataRate.textContent = rate.toFixed(1) + ' KB/s';
+    } else {
+        elements.streamDuration.textContent = '0s';
+        elements.dataRate.textContent = '0 KB/s';
     }
-    
-    updateStatus(`❌ ${errorMessage}`, 'error');
-    isWaitingForResponse = false;
 }
 
-// Event Listeners
-recordBtn.addEventListener('click', () => {
-    if (!isRecording && !isWaitingForResponse) {
-        startRecording();
-    } else if (isRecording) {
-        stopRecording();
-    }
-});
-
-stopConversationBtn.addEventListener('click', stopConversation);
-newSessionBtn.addEventListener('click', createNewSession);
-
-// Auto-recording after AI response
-audioPlayback.addEventListener('ended', () => {
-    console.log("AI audio finished playing");
-    if (conversationActive && !isRecording && !isWaitingForResponse) {
-        setTimeout(() => {
-            if (conversationActive) {
-                console.log("Auto-starting recording after AI response");
-                startRecording();
-            }
-        }, 1000);
-    }
-});
-
-// Save user name to localStorage
-userNameInput.addEventListener('change', () => {
-    localStorage.setItem('userName', userNameInput.value);
-});
-
-// Load saved user name
-const savedName = localStorage.getItem('userName');
-if (savedName) {
-    userNameInput.value = savedName;
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
+
+function formatDuration(seconds) {
+    if (seconds < 60) {
+        return seconds.toFixed(1) + 's';
+    }
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = Math.floor(seconds % 60);
+    return `${minutes}m ${remainingSeconds}s`;
+}
+
+// Event listeners
+elements.connectBtn.addEventListener('click', connectWebSocket);
+elements.disconnectBtn.addEventListener('click', disconnectWebSocket);
+elements.recordBtn.addEventListener('click', startRecording);
+elements.stopBtn.addEventListener('click', stopRecording);
+elements.streamInfoBtn.addEventListener('click', getStreamInfo);
+elements.clearLogBtn.addEventListener('click', clearLog);
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
-    console.log("Initializing Modern AI Conversational Agent...");
+    logMessage('info', 'Audio Streaming Test Client initialized');
     initializeSession();
-    console.log("Agent initialized successfully!");
 });
 
-// Utility functions for debugging
-window.voiceAgentUtils = {
-    getCurrentSession: function() {
+// Clean up on page unload
+window.addEventListener('beforeunload', function() {
+    if (isRecording) {
+        stopRecording();
+    }
+    if (audioWebSocket) {
+        disconnectWebSocket();
+    }
+});
+
+// Export utilities for debugging
+window.streamingTestUtils = {
+    getState: function() {
         return {
             sessionId: currentSessionId,
+            streamId: currentStreamId,
             isRecording: isRecording,
-            isWaiting: isWaitingForResponse,
-            conversationActive: conversationActive
+            isStreaming: isStreaming,
+            wsState: audioWebSocket ? audioWebSocket.readyState : 'closed',
+            chunksSent: chunksSent,
+            bytesSent: bytesSent
         };
     },
     
-    createNewSession: createNewSession,
-    stopConversation: stopConversation
+    connect: connectWebSocket,
+    disconnect: disconnectWebSocket,
+    startRecord: startRecording,
+    stopRecord: stopRecording,
+    getInfo: getStreamInfo,
+    clearLog: clearLog
 };
 
-console.log("💡 Try: voiceAgentUtils.getCurrentSession() to check current session");
+console.log("💡 Available debug utilities:");
+console.log("- streamingTestUtils.getState() - Get current state");
+console.log("- streamingTestUtils.connect() - Connect WebSocket");
+console.log("- streamingTestUtils.startRecord() - Start recording");
+console.log("- streamingTestUtils.stopRecord() - Stop recording");
