@@ -5,6 +5,7 @@ let audioContext = null;
 let processor = null;
 let source = null;
 let stream = null;
+let audioChunks = [];
 
 // Calculate proper buffer size for 200ms chunks at 16kHz
 const SAMPLE_RATE = 16000;
@@ -200,6 +201,12 @@ function handleMessage(data) {
         addMessage(`👤 You: ${data.text}`, timestamp);
     } else if (data.type === 'llm_response') {
         addMessage(`🤖 AI: ${data.text}`, timestamp, 'llm-response');
+    }
+    if (data.type === 'audio_chunk') {
+        // Accumulate base64 audio chunks
+        audioChunks.push(data.data);
+        console.log(`🎧 Audio chunk received: ${data.data.length} characters (Total chunks: ${audioChunks.length})`);
+        console.log('Base64 Audio Data:', data.data.substring(0, 50) + '...');
     }
 }
 
