@@ -1,459 +1,217 @@
-// test-streaming.js
-console.log("Audio Streaming Test Client loaded");
-
-// Global variables
-let audioWebSocket = null;
-let mediaRecorder = null;
-let currentSessionId = null;
-let currentStreamId = null;
+let ws = null;
 let isRecording = false;
-let isStreaming = false;
-let streamStartTime = null;
-let chunksSent = 0;
-let bytesSent = 0;
-let statsInterval = null;
+let audioBuffer = [];
+let audioContext = null;
+let processor = null;
+let source = null;
+let stream = null;
 
-// DOM elements
-const elements = {
-    sessionId: document.getElementById('sessionId'),
-    wsStatus: document.getElementById('wsStatus'),
-    streamId: document.getElementById('streamId'),
-    recordingStatus: document.getElementById('recordingStatus'),
-    currentStatus: document.getElementById('currentStatus'),
-    logContainer: document.getElementById('logContainer'),
-    chunksSent: document.getElementById('chunksSent'),
-    bytesSent: document.getElementById('bytesSent'),
-    streamDuration: document.getElementById('streamDuration'),
-    dataRate: document.getElementById('dataRate'),
+// Calculate proper buffer size for 200ms chunks at 16kHz
+const SAMPLE_RATE = 16000;
+const CHUNK_DURATION_MS = 100; // 200ms chunks (well within 50-1000ms requirement)
+const SAMPLES_PER_CHUNK = (SAMPLE_RATE * CHUNK_DURATION_MS) / 1000;
+const BYTES_PER_CHUNK = SAMPLES_PER_CHUNK * 2; // 2 bytes per 16-bit sample
+
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const status = document.getElementById('status');
+const messages = document.getElementById('messages');
+
+startBtn.onclick = startRecording;
+stopBtn.onclick = stopRecording;
+
+function sendAudioChunk() {
+    if (audioBuffer.length === 0 || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+    // Calculate total samples needed for our target duration
+    const totalSamples = audioBuffer.reduce((sum, chunk) => sum + chunk.length, 0);
     
-    connectBtn: document.getElementById('connectBtn'),
-    disconnectBtn: document.getElementById('disconnectBtn'),
-    recordBtn: document.getElementById('recordBtn'),
-    stopBtn: document.getElementById('stopBtn'),
-    streamInfoBtn: document.getElementById('streamInfoBtn'),
-    clearLogBtn: document.getElementById('clearLogBtn')
-};
+    if (totalSamples < SAMPLES_PER_CHUNK) return; // Wait for more data
 
-// Initialize session
-function initializeSession() {
-    currentSessionId = 'test-session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-    elements.sessionId.textContent = currentSessionId;
-    updateStatus("Session initialized. Click 'Connect WebSocket' to begin.");
-    logMessage('info', 'Session initialized: ' + currentSessionId);
-}
+    // Take exactly the amount we need for our chunk duration
+    const chunkBuffer = new Int16Array(SAMPLES_PER_CHUNK);
+    let samplesUsed = 0;
+    let bufferIndex = 0;
 
-// Update status display
-function updateStatus(message, type = 'info') {
-    elements.currentStatus.textContent = message;
-    elements.currentStatus.style.borderLeftColor = getStatusColor(type);
-    logMessage(type, message);
-}
+    while (samplesUsed < SAMPLES_PER_CHUNK && bufferIndex < audioBuffer.length) {
+        const currentChunk = audioBuffer[bufferIndex];
+        const samplesNeeded = SAMPLES_PER_CHUNK - samplesUsed;
+        const samplesToTake = Math.min(samplesNeeded, currentChunk.length);
 
-function getStatusColor(type) {
-    const colors = {
-        'info': '#2196f3',
-        'success': '#4caf50',
-        'error': '#f44336',
-        'warning': '#ff9800'
-    };
-    return colors[type] || '#2196f3';
-}
+        chunkBuffer.set(currentChunk.subarray(0, samplesToTake), samplesUsed);
+        samplesUsed += samplesToTake;
 
-// Logging functions
-function logMessage(type, message) {
-    const logEntry = document.createElement('div');
-    logEntry.className = `log-entry log-${type}`;
-    
-    const timestamp = new Date().toLocaleTimeString();
-    logEntry.innerHTML = `
-        <span class="log-timestamp">[${timestamp}]</span>
-        <span class="log-message">${message}</span>
-    `;
-    
-    elements.logContainer.appendChild(logEntry);
-    elements.logContainer.scrollTop = elements.logContainer.scrollHeight;
-    
-    console.log(`[${type.toUpperCase()}] ${message}`);
-}
+        if (samplesToTake < currentChunk.length) {
+            // Keep the remaining part of this chunk
+            audioBuffer[bufferIndex] = currentChunk.subarray(samplesToTake);
+        } else {
+            // Remove this chunk entirely
+            bufferIndex++;
+        }
+    }
 
-function clearLog() {
-    elements.logContainer.innerHTML = '';
-    logMessage('info', 'Log cleared');
-}
+    // Remove used buffers
+    audioBuffer = audioBuffer.slice(bufferIndex);
 
-// WebSocket functions
-function connectWebSocket() {
-    if (audioWebSocket && audioWebSocket.readyState === WebSocket.OPEN) {
-        logMessage('warning', 'WebSocket already connected');
+    // Send the properly sized chunk
+    console.log(`Sending audio chunk: ${chunkBuffer.length} samples (${CHUNK_DURATION_MS}ms)`);
+
+    // Safety check for chunk size (max 800ms to be safe)
+    const maxSamples = (SAMPLE_RATE * 800) / 1000;
+    if (chunkBuffer.length > maxSamples) {
+        console.log("Chunk too large, skipping");
         return;
     }
-    
-    const wsUrl = `ws://localhost:8000/ws/audio/${currentSessionId}`;
-    logMessage('info', `Connecting to WebSocket: ${wsUrl}`);
-    
-    elements.wsStatus.textContent = 'Connecting...';
-    elements.wsStatus.className = 'status-connecting';
-    updateStatus("Connecting to WebSocket server...", 'info');
-    
-    audioWebSocket = new WebSocket(wsUrl);
-    
-    audioWebSocket.onopen = function(event) {
-        logMessage('success', 'WebSocket connected successfully');
-        elements.wsStatus.textContent = 'Connected';
-        elements.wsStatus.className = 'status-connected';
-        updateStatus("WebSocket connected. Ready to stream audio.", 'success');
-        
-        // Enable/disable buttons
-        elements.connectBtn.disabled = true;
-        elements.disconnectBtn.disabled = false;
-        elements.recordBtn.disabled = false;
-        elements.streamInfoBtn.disabled = false;
-    };
-    
-    audioWebSocket.onmessage = function(event) {
-        try {
-            const data = JSON.parse(event.data);
-            handleWebSocketMessage(data);
-        } catch (error) {
-            logMessage('info', `WebSocket message: ${event.data}`);
-        }
-    };
-    
-    audioWebSocket.onclose = function(event) {
-        logMessage('warning', `WebSocket connection closed (code: ${event.code})`);
-        elements.wsStatus.textContent = 'Disconnected';
-        elements.wsStatus.className = 'status-disconnected';
-        updateStatus("WebSocket disconnected", 'warning');
-        
-        // Reset state
-        audioWebSocket = null;
-        isStreaming = false;
-        currentStreamId = null;
-        elements.streamId.textContent = 'None';
-        
-        // Enable/disable buttons
-        elements.connectBtn.disabled = false;
-        elements.disconnectBtn.disabled = true;
-        elements.recordBtn.disabled = true;
-        elements.stopBtn.disabled = true;
-        elements.streamInfoBtn.disabled = true;
-        
-        if (isRecording) {
-            stopRecording();
-        }
-    };
-    
-    audioWebSocket.onerror = function(error) {
-        logMessage('error', `WebSocket error: ${error.message || 'Connection failed'}`);
-        updateStatus("WebSocket connection error", 'error');
-    };
+
+    ws.send(chunkBuffer.buffer);
 }
 
-function disconnectWebSocket() {
-    if (audioWebSocket) {
-        if (isRecording) {
-            stopRecording();
-        }
-        
-        logMessage('info', 'Disconnecting WebSocket');
-        audioWebSocket.close();
-    }
-}
-
-function handleWebSocketMessage(data) {
-    logMessage('info', `WebSocket message: ${data.type}`);
-    
-    switch(data.type) {
-        case 'audio_welcome':
-            logMessage('success', data.message);
-            break;
-            
-        case 'stream_started':
-            currentStreamId = data.stream_id;
-            isStreaming = true;
-            streamStartTime = Date.now();
-            elements.streamId.textContent = currentStreamId;
-            logMessage('success', `Audio streaming started: ${currentStreamId}`);
-            updateStatus("Audio streaming active. Recording will be saved to server.", 'success');
-            
-            // Start statistics updates
-            startStatsUpdates();
-            break;
-            
-        case 'stream_stopped':
-            const result = data.result;
-            isStreaming = false;
-            currentStreamId = null;
-            streamStartTime = null;
-            elements.streamId.textContent = 'None';
-            
-            logMessage('success', `Stream stopped: ${result.filename}`);
-            logMessage('data', `Stats: ${result.chunks_received} chunks, ${result.total_bytes} bytes`);
-            updateStatus(`Stream saved to: ${result.filename}`, 'success');
-            
-            // Stop statistics updates
-            stopStatsUpdates();
-            break;
-            
-        case 'error':
-            logMessage('error', `Server error: ${data.message}`);
-            updateStatus(`Error: ${data.message}`, 'error');
-            break;
-            
-        case 'stream_info':
-            if (data.stream_info) {
-                const info = data.stream_info;
-                logMessage('data', `Stream info: ${info.chunks_received} chunks, ${info.total_bytes} bytes`);
-            } else {
-                logMessage('info', data.message || 'No active stream');
-            }
-            break;
-            
-        default:
-            logMessage('info', `Unknown message type: ${data.type}`);
-    }
-}
-
-// Audio recording functions
 async function startRecording() {
-    if (isRecording) {
-        logMessage('warning', 'Already recording');
-        return;
-    }
-    
-    if (!audioWebSocket || audioWebSocket.readyState !== WebSocket.OPEN) {
-        logMessage('error', 'WebSocket not connected');
-        updateStatus("Cannot start recording: WebSocket not connected", 'error');
-        return;
-    }
-    
     try {
-        logMessage('info', 'Requesting microphone access...');
+        // Reset buffers
+        audioBuffer = [];
         
-        // Get microphone access
-        const stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
+        ws = new WebSocket('ws://127.0.0.1:8000/ws');
+        
+        ws.onopen = () => {
+            status.textContent = 'Connected';
+            status.className = 'status connected';
+            ws.send(JSON.stringify({type: 'start'}));
+        };
+        
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            handleMessage(data);
+        };
+        
+        ws.onclose = () => {
+            status.textContent = 'Disconnected';
+            status.className = 'status disconnected';
+        };
+
+        ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            status.textContent = 'Connection Error';
+            status.className = 'status disconnected';
+        };
+
+        stream = await navigator.mediaDevices.getUserMedia({
+            audio: { 
+                sampleRate: SAMPLE_RATE,
+                channelCount: 1,
                 echoCancellation: true,
-                noiseSuppression: true,
-                sampleRate: 44100
+                noiseSuppression: true
             }
         });
-        
-        logMessage('success', 'Microphone access granted');
-        
-        // Check for supported MIME types
-        let mimeType = 'audio/webm;codecs=opus';
-        if (!MediaRecorder.isTypeSupported(mimeType)) {
-            mimeType = 'audio/webm';
-            if (!MediaRecorder.isTypeSupported(mimeType)) {
-                mimeType = 'audio/mp4';
-                if (!MediaRecorder.isTypeSupported(mimeType)) {
-                    mimeType = '';
-                }
-            }
-        }
-        
-        logMessage('info', `Using MIME type: ${mimeType || 'default'}`);
-        
-        // Create MediaRecorder
-        mediaRecorder = new MediaRecorder(stream, mimeType ? { 
-            mimeType: mimeType,
-            audioBitsPerSecond: 128000 
-        } : {});
-        
-        // Reset statistics
-        chunksSent = 0;
-        bytesSent = 0;
-        updateStatsDisplay();
-        
-        // Handle data available
-        mediaRecorder.ondataavailable = function(event) {
-            if (event.data.size > 0 && audioWebSocket && audioWebSocket.readyState === WebSocket.OPEN && isStreaming) {
-                // Convert Blob to ArrayBuffer and send
-                event.data.arrayBuffer().then(buffer => {
-                    audioWebSocket.send(buffer);
-                    
-                    // Update statistics
-                    chunksSent++;
-                    bytesSent += buffer.byteLength;
-                    updateStatsDisplay();
-                    
-                    logMessage('data', `Sent chunk ${chunksSent}: ${buffer.byteLength} bytes`);
-                }).catch(error => {
-                    logMessage('error', `Error sending audio chunk: ${error.message}`);
-                });
-            }
-        };
-        
-        mediaRecorder.onstop = function() {
-            logMessage('info', 'MediaRecorder stopped');
-            stream.getTracks().forEach(track => track.stop());
+
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({
+            sampleRate: SAMPLE_RATE
+        });
+
+        // Use a smaller buffer size for more frequent processing
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+        source = audioContext.createMediaStreamSource(stream);
+
+        processor.onaudioprocess = (event) => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
             
-            // Stop server-side stream if still active
-            if (isStreaming && audioWebSocket && audioWebSocket.readyState === WebSocket.OPEN) {
-                const stopCommand = { type: "stop_stream" };
-                audioWebSocket.send(JSON.stringify(stopCommand));
-                logMessage('info', 'Sent stop_stream command to server');
+            const inputData = event.inputBuffer.getChannelData(0);
+            const int16Data = new Int16Array(inputData.length);
+    
+            // Convert float32 to int16
+            for (let i = 0; i < inputData.length; i++) {
+                const sample = Math.max(-1, Math.min(1, inputData[i]));
+                int16Data[i] = sample * 0x7FFF;
             }
+    
+            // Add to buffer
+            audioBuffer.push(int16Data);
+    
+            // Send chunk when we have enough data
+            sendAudioChunk();
         };
+
+        source.connect(processor);
+        processor.connect(audioContext.destination);
         
-        // Start recording
-        mediaRecorder.start(100); // Send data every 100ms
         isRecording = true;
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        startBtn.textContent = '🎙️ Recording...';
         
-        // Start server-side streaming
-        const startCommand = { type: "start_stream" };
-        audioWebSocket.send(JSON.stringify(startCommand));
-        logMessage('info', 'Sent start_stream command to server');
-        
-        // Update UI
-        elements.recordBtn.textContent = '🔴 Recording...';
-        elements.recordBtn.classList.add('recording');
-        elements.recordBtn.disabled = true;
-        elements.stopBtn.disabled = false;
-        elements.recordingStatus.textContent = 'Recording';
-        elements.recordingStatus.style.color = '#f44336';
-        
-        updateStatus("Recording started. Audio chunks are being streamed to server.", 'success');
+        console.log(`Started recording with ${CHUNK_DURATION_MS}ms chunks`);
         
     } catch (error) {
-        logMessage('error', `Failed to start recording: ${error.message}`);
-        updateStatus(`Recording failed: ${error.message}`, 'error');
+        console.error('Error starting recording:', error);
+        alert('Microphone access denied or not available');
+        resetUI();
     }
 }
 
 function stopRecording() {
-    if (!isRecording) {
-        logMessage('warning', 'Not currently recording');
-        return;
+    console.log('Stopping recording...');
+    
+    // Send any remaining audio data
+    audioBuffer = [];
+    
+    // Clean up audio context
+    if (processor) {
+        processor.disconnect();
+        processor = null;
+    }
+    if (source) {
+        source.disconnect();
+        source = null;
+    }
+    if (audioContext) {
+        audioContext.close();
+        audioContext = null;
     }
     
-    logMessage('info', 'Stopping recording...');
-    
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-        mediaRecorder.stop();
+    // Stop media stream
+    if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
     }
     
+    // Close WebSocket
+    if (ws) {
+        ws.close();
+        ws = null;
+    }
+    
+    audioBuffer = [];
+    resetUI();
+}
+
+function resetUI() {
     isRecording = false;
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    startBtn.textContent = 'Start Recording';
+    status.textContent = 'Ready';
+    status.className = 'status';
+}
+
+function handleMessage(data) {
+    const timestamp = new Date().toLocaleTimeString();
     
-    // Update UI
-    elements.recordBtn.textContent = '🎙️ Start Recording';
-    elements.recordBtn.classList.remove('recording');
-    elements.recordBtn.disabled = false;
-    elements.stopBtn.disabled = true;
-    elements.recordingStatus.textContent = 'Stopped';
-    elements.recordingStatus.style.color = '#fff';
-    
-    updateStatus("Recording stopped. Processing final chunks...", 'info');
-}
-
-function getStreamInfo() {
-    if (audioWebSocket && audioWebSocket.readyState === WebSocket.OPEN) {
-        const infoCommand = { type: "stream_info" };
-        audioWebSocket.send(JSON.stringify(infoCommand));
-        logMessage('info', 'Requested stream info from server');
-    } else {
-        logMessage('warning', 'WebSocket not connected');
+    if (data.type === 'turn_end') {
+        addMessage(`👤 You: ${data.text}`, timestamp);
+    } else if (data.type === 'llm_response') {
+        addMessage(`🤖 AI: ${data.text}`, timestamp, 'llm-response');
     }
 }
 
-// Statistics functions
-function startStatsUpdates() {
-    if (statsInterval) {
-        clearInterval(statsInterval);
-    }
-    
-    statsInterval = setInterval(updateStatsDisplay, 500);
+function addMessage(text, timestamp, className = '') {
+    const div = document.createElement('div');
+    div.className = `turn ${className}`;
+    div.innerHTML = `
+        <div class="timestamp">${timestamp}</div>
+        <div>${text}</div>
+    `;
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
 }
 
-function stopStatsUpdates() {
-    if (statsInterval) {
-        clearInterval(statsInterval);
-        statsInterval = null;
-    }
-}
-
-function updateStatsDisplay() {
-    elements.chunksSent.textContent = chunksSent;
-    elements.bytesSent.textContent = formatBytes(bytesSent);
-    
-    if (streamStartTime) {
-        const duration = (Date.now() - streamStartTime) / 1000;
-        elements.streamDuration.textContent = formatDuration(duration);
-        
-        const rate = duration > 0 ? (bytesSent / duration / 1024) : 0;
-        elements.dataRate.textContent = rate.toFixed(1) + ' KB/s';
-    } else {
-        elements.streamDuration.textContent = '0s';
-        elements.dataRate.textContent = '0 KB/s';
-    }
-}
-
-function formatBytes(bytes) {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-}
-
-function formatDuration(seconds) {
-    if (seconds < 60) {
-        return seconds.toFixed(1) + 's';
-    }
-    const minutes = Math.floor(seconds / 60);
-    const remainingSeconds = Math.floor(seconds % 60);
-    return `${minutes}m ${remainingSeconds}s`;
-}
-
-// Event listeners
-elements.connectBtn.addEventListener('click', connectWebSocket);
-elements.disconnectBtn.addEventListener('click', disconnectWebSocket);
-elements.recordBtn.addEventListener('click', startRecording);
-elements.stopBtn.addEventListener('click', stopRecording);
-elements.streamInfoBtn.addEventListener('click', getStreamInfo);
-elements.clearLogBtn.addEventListener('click', clearLog);
-
-// Initialize on page load
-document.addEventListener('DOMContentLoaded', function() {
-    logMessage('info', 'Audio Streaming Test Client initialized');
-    initializeSession();
-});
-
-// Clean up on page unload
-window.addEventListener('beforeunload', function() {
-    if (isRecording) {
-        stopRecording();
-    }
-    if (audioWebSocket) {
-        disconnectWebSocket();
-    }
-});
-
-// Export utilities for debugging
-window.streamingTestUtils = {
-    getState: function() {
-        return {
-            sessionId: currentSessionId,
-            streamId: currentStreamId,
-            isRecording: isRecording,
-            isStreaming: isStreaming,
-            wsState: audioWebSocket ? audioWebSocket.readyState : 'closed',
-            chunksSent: chunksSent,
-            bytesSent: bytesSent
-        };
-    },
-    
-    connect: connectWebSocket,
-    disconnect: disconnectWebSocket,
-    startRecord: startRecording,
-    stopRecord: stopRecording,
-    getInfo: getStreamInfo,
-    clearLog: clearLog
-};
-
-console.log("💡 Available debug utilities:");
-console.log("- streamingTestUtils.getState() - Get current state");
-console.log("- streamingTestUtils.connect() - Connect WebSocket");
-console.log("- streamingTestUtils.startRecord() - Start recording");
-console.log("- streamingTestUtils.stopRecord() - Stop recording");
+window.addEventListener('beforeunload', stopRecording);
