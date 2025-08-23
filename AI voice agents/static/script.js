@@ -6,6 +6,10 @@ let processor = null;
 let source = null;
 let stream = null;
 let audioChunks = [];
+let audioBufferSize = 10;
+let isPlayingAudio = false;
+let isBuffering = true;
+let playheadTime = 0;
 
 // Calculate proper buffer size for 200ms chunks at 16kHz
 const SAMPLE_RATE = 16000;
@@ -82,6 +86,7 @@ async function startRecording() {
         
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
+            console.log('Received:', data.type);
             handleMessage(data);
         };
         
@@ -154,6 +159,10 @@ function stopRecording() {
     
     // Send any remaining audio data
     audioBuffer = [];
+    audioChunks = [];
+    isPlayingAudio = false;
+    isBuffering = false;
+    playheadTime = 0;
     
     // Clean up audio context
     if (processor) {
@@ -165,8 +174,11 @@ function stopRecording() {
         source = null;
     }
     if (audioContext) {
-        audioContext.close();
-        audioContext = null;
+        audioContext.close().then(() =>{
+            audioContext = null;
+            console.log('Audio context closed');
+        });
+        
     }
     
     // Stop media stream
@@ -183,6 +195,7 @@ function stopRecording() {
     
     audioBuffer = [];
     resetUI();
+    isPlayingAudio = false;
 }
 
 function resetUI() {
@@ -197,16 +210,14 @@ function resetUI() {
 function handleMessage(data) {
     const timestamp = new Date().toLocaleTimeString();
     
-    if (data.type === 'turn_end') {
-        addMessage(`👤 You: ${data.text}`, timestamp);
+    if (data.type === 'audio_chunk' && data.data) {
+        playAudioChunk(data.data);
+    } else if (data.type === 'turn_end') {
+        addMessage(`👤 You: ${data.text}`, new Date().toLocaleTimeString());
     } else if (data.type === 'llm_response') {
-        addMessage(`🤖 AI: ${data.text}`, timestamp, 'llm-response');
-    }
-    if (data.type === 'audio_chunk') {
-        // Accumulate base64 audio chunks
-        audioChunks.push(data.data);
-        console.log(`🎧 Audio chunk received: ${data.data.length} characters (Total chunks: ${audioChunks.length})`);
-        console.log('Base64 Audio Data:', data.data.substring(0, 50) + '...');
+        addMessage(`🤖 AI: ${data.text}`, new Date().toLocaleTimeString(), 'llm-response');
+    } else if (data.type === 'stream_end' || data.type === 'audio_end') {
+        handleAudioStreamEnd();
     }
 }
 
@@ -219,6 +230,211 @@ function addMessage(text, timestamp, className = '') {
     `;
     messages.appendChild(div);
     messages.scrollTop = messages.scrollHeight;
+}
+function base64ToPCMFloat32(base64) {
+    try {
+        if (!base64 || typeof base64 !== 'string') {
+            console.error('Invalid base64 input');
+            return null;
+        }
+        // Remove any non-base64 characters
+        const cleanBase64 = base64.replace(/[^A-Za-z0-9+/=]/g, '');
+        
+        if (cleanBase64.length === 0 || cleanBase64.length % 4 !== 0) {
+            console.error('Invalid base64 string length');
+            return null;
+        }
+        
+        const binary = atob(cleanBase64);
+        const length = binary.length;
+        
+        // Check if this is a WAV file with header (starts with "RIFF")
+        let offset = 0;
+        if (length > 44 && binary.substring(0, 4) === 'RIFF') {
+            offset = 44; // Skip WAV header
+            console.log('Skipping WAV header (44 bytes)');
+        }
+        
+        const pcmLength = length - offset;
+        if (pcmLength <= 0) {
+            console.error('No PCM data after header');
+            return null;
+        }
+        
+        const buffer = new ArrayBuffer(pcmLength);
+        const byteArray = new Uint8Array(buffer);
+        
+        for (let i = 0; i < pcmLength; i++) {
+            byteArray[i] = binary.charCodeAt(i + offset);
+        }
+
+        const view = new DataView(buffer);
+        const sampleCount = pcmLength / 2;
+        const float32Array = new Float32Array(sampleCount);
+
+        for (let i = 0; i < sampleCount; i++) {
+            const int16 = view.getInt16(i * 2, true);
+            float32Array[i] = int16 / 32768; // Convert to float32 (-1 to 1)
+        }
+
+        console.log(`Converted ${pcmLength} bytes to ${sampleCount} samples`);
+        return float32Array;
+    } catch (error) {
+        console.error('Error in base64ToPCMFloat32:', error);
+        return null;
+    }
+}
+function chunkPlay() {
+    if (audioChunks.length === 0 || !audioContext) {
+        isPlayingAudio = false;
+        console.log('No chunks to play or no audio context');
+        return;
+    }
+    
+    const chunk = audioChunks.shift();
+    console.log('Playing chunk with', chunk.length, 'samples');
+    
+    try {
+        const buffer = audioContext.createBuffer(1, chunk.length, 44100);
+        buffer.copyToChannel(chunk, 0);
+
+        const source = audioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioContext.destination);
+
+        const now = audioContext.currentTime;
+        if (playheadTime < now) {
+            playheadTime = now + 0.05;
+            console.log('Adjusting playhead time to', playheadTime);
+        }
+
+        source.start(playheadTime);
+        playheadTime += buffer.duration;
+        console.log('Scheduled chunk to play at', playheadTime - buffer.duration, 'for', buffer.duration, 'seconds');
+
+        source.onended = () => {
+            console.log('Chunk finished playing');
+            if (audioChunks.length > 0) {
+                chunkPlay();
+            } else {
+                isPlayingAudio = false;
+                console.log('All chunks played');
+            }
+        };
+    } catch (error) {
+        console.error('Error in chunkPlay:', error);
+        isPlayingAudio = false;
+    }
+}
+function playAudioChunk(base64audio) {
+    try {
+        console.log('Processing audio chunk, length:', base64audio.length);
+        
+        // Initialize audio context if needed
+        if (!audioContext) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: 44100, // Match the server's sample rate
+                latencyHint: 'playback'
+            });
+            playheadTime = audioContext.currentTime;
+            console.log('Created new audio context with sample rate 44100Hz');
+        }
+        
+        // Convert base64 to PCM float32 array
+        const float32Arr = base64ToPCMFloat32(base64audio);
+        if (!float32Arr || float32Arr.length === 0) {
+            console.log("No valid audio data to play");
+            return;
+        }
+        
+        console.log('Adding audio chunk with', float32Arr.length, 'samples to queue');
+        audioChunks.push(float32Arr);
+        
+        // Start playback if not already playing
+        if (!isPlayingAudio && audioChunks.length>=audioBufferSize) {
+            isPlayingAudio = true;
+            isBuffering = false;
+            console.log('Starting audio playback with buffer:',audioChunks.length,'chunks');
+            audioContext.resume().then(() => {
+                playNextChunk();
+            }).catch(err => {
+                console.error('Failed to resume audio context:', err);
+                isPlayingAudio = false;
+            });
+        } else if (!isPlayingAudio){
+            console.log("Buffering audio chunks:", audioChunks.length,'/',audioBufferSize);
+        }
+    } catch(error) {
+        console.error("Error in playAudioChunk:", error);
+        isPlayingAudio = false;
+    }
+}
+
+function playNextChunk() {
+    if (audioChunks.length === 0 || !audioContext) {
+        if(isBuffering){
+            setTimeout(playNextChunk, 50);
+            return;
+        }
+        isPlayingAudio = false;
+        console.log('Audio playback finished');
+        return;
+    }
+    
+    const chunk = audioChunks.shift();
+    console.log('Playing audio chunk with', chunk.length, 'samples');
+    
+    try {
+        // Create audio buffer with the correct sample rate (44100Hz)
+        const buffer = audioContext.createBuffer(1, chunk.length, 44100);
+        buffer.copyToChannel(chunk, 0);
+
+        // Create and configure audio source
+        const source = audioContext.createBufferSource();
+        source.buffer = buffer;
+        const gainNode = audioContext.createGain();
+        source.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        
+        // Schedule playback
+        const now = audioContext.currentTime;
+        if (playheadTime < now || playheadTime===0) {
+            playheadTime = now + 0.05; // Add a small delay if needed
+        }
+        gainNode.gain.setValueAtTime(0.01,playheadTime)
+        gainNode.gain.exponentialRampToValueAtTime(1.0,playheadTime+0.01);
+        source.start(playheadTime);
+        const nextChunkStartTime = playheadTime + buffer.duration - 0.02; 
+        playheadTime += buffer.duration;
+        
+        console.log('Scheduled audio chunk to play at', playheadTime - buffer.duration, 
+                   'for', buffer.duration.toFixed(3), 'seconds');
+        
+        // Schedule next chunk when this one finishes
+        source.onended = () => {
+            console.log('Audio chunk finished playing');
+            setTimeout(() => {
+                playNextChunk();
+            }, 10);
+        };
+        
+    } catch (error) {
+        console.error('Error playing audio chunk:', error);
+        isPlayingAudio = false;
+    }
+}
+
+function handleAudioStreamEnd() {
+    console.log('Audio stream ended');
+    isBuffering = false;
+    
+    // If we're not currently playing but have chunks, play them
+    if (!isPlayingAudio && audioChunks.length > 0) {
+        isPlayingAudio = true;
+        audioContext.resume().then(() => {
+            playNextChunk();
+        });
+    }
 }
 
 window.addEventListener('beforeunload', stopRecording);
