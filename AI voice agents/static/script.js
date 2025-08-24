@@ -233,42 +233,21 @@ function addMessage(text, timestamp, className = '') {
 }
 function base64ToPCMFloat32(base64) {
     try {
-        if (!base64 || typeof base64 !== 'string') {
-            console.error('Invalid base64 input');
-            return null;
-        }
         // Remove any non-base64 characters
         const cleanBase64 = base64.replace(/[^A-Za-z0-9+/=]/g, '');
-        
-        if (cleanBase64.length === 0 || cleanBase64.length % 4 !== 0) {
-            console.error('Invalid base64 string length');
-            return null;
-        }
-        
         const binary = atob(cleanBase64);
-        const length = binary.length;
-        
-        // Check if this is a WAV file with header (starts with "RIFF")
         let offset = 0;
-        if (length > 44 && binary.substring(0, 4) === 'RIFF') {
+        if (binary.length > 44 && binary.substring(0, 4) === 'RIFF') {
             offset = 44; // Skip WAV header
             console.log('Skipping WAV header (44 bytes)');
         }
-        
-        const pcmLength = length - offset;
-        if (pcmLength <= 0) {
-            console.error('No PCM data after header');
-            return null;
-        }
-        
-        const buffer = new ArrayBuffer(pcmLength);
-        const byteArray = new Uint8Array(buffer);
+        const pcmLength = binary.length - offset;
+        const byteArray = new Uint8Array(pcmLength);
         
         for (let i = 0; i < pcmLength; i++) {
             byteArray[i] = binary.charCodeAt(i + offset);
         }
-
-        const view = new DataView(buffer);
+        const view = new DataView(byteArray.buffer);
         const sampleCount = pcmLength / 2;
         const float32Array = new Float32Array(sampleCount);
 
@@ -276,54 +255,11 @@ function base64ToPCMFloat32(base64) {
             const int16 = view.getInt16(i * 2, true);
             float32Array[i] = int16 / 32768; // Convert to float32 (-1 to 1)
         }
-
         console.log(`Converted ${pcmLength} bytes to ${sampleCount} samples`);
         return float32Array;
     } catch (error) {
         console.error('Error in base64ToPCMFloat32:', error);
         return null;
-    }
-}
-function chunkPlay() {
-    if (audioChunks.length === 0 || !audioContext) {
-        isPlayingAudio = false;
-        console.log('No chunks to play or no audio context');
-        return;
-    }
-    
-    const chunk = audioChunks.shift();
-    console.log('Playing chunk with', chunk.length, 'samples');
-    
-    try {
-        const buffer = audioContext.createBuffer(1, chunk.length, 44100);
-        buffer.copyToChannel(chunk, 0);
-
-        const source = audioContext.createBufferSource();
-        source.buffer = buffer;
-        source.connect(audioContext.destination);
-
-        const now = audioContext.currentTime;
-        if (playheadTime < now) {
-            playheadTime = now + 0.05;
-            console.log('Adjusting playhead time to', playheadTime);
-        }
-
-        source.start(playheadTime);
-        playheadTime += buffer.duration;
-        console.log('Scheduled chunk to play at', playheadTime - buffer.duration, 'for', buffer.duration, 'seconds');
-
-        source.onended = () => {
-            console.log('Chunk finished playing');
-            if (audioChunks.length > 0) {
-                chunkPlay();
-            } else {
-                isPlayingAudio = false;
-                console.log('All chunks played');
-            }
-        };
-    } catch (error) {
-        console.error('Error in chunkPlay:', error);
-        isPlayingAudio = false;
     }
 }
 function playAudioChunk(base64audio) {
@@ -334,7 +270,6 @@ function playAudioChunk(base64audio) {
         if (!audioContext) {
             audioContext = new (window.AudioContext || window.webkitAudioContext)({
                 sampleRate: 44100, // Match the server's sample rate
-                latencyHint: 'playback'
             });
             playheadTime = audioContext.currentTime;
             console.log('Created new audio context with sample rate 44100Hz');
@@ -342,84 +277,21 @@ function playAudioChunk(base64audio) {
         
         // Convert base64 to PCM float32 array
         const float32Arr = base64ToPCMFloat32(base64audio);
-        if (!float32Arr || float32Arr.length === 0) {
-            console.log("No valid audio data to play");
-            return;
-        }
-        
         console.log('Adding audio chunk with', float32Arr.length, 'samples to queue');
-        audioChunks.push(float32Arr);
-        
-        // Start playback if not already playing
-        if (!isPlayingAudio && audioChunks.length>=audioBufferSize) {
-            isPlayingAudio = true;
-            isBuffering = false;
-            console.log('Starting audio playback with buffer:',audioChunks.length,'chunks');
-            audioContext.resume().then(() => {
-                playNextChunk();
-            }).catch(err => {
-                console.error('Failed to resume audio context:', err);
-                isPlayingAudio = false;
-            });
-        } else if (!isPlayingAudio){
-            console.log("Buffering audio chunks:", audioChunks.length,'/',audioBufferSize);
-        }
-    } catch(error) {
-        console.error("Error in playAudioChunk:", error);
-        isPlayingAudio = false;
-    }
-}
-
-function playNextChunk() {
-    if (audioChunks.length === 0 || !audioContext) {
-        if(isBuffering){
-            setTimeout(playNextChunk, 50);
-            return;
-        }
-        isPlayingAudio = false;
-        console.log('Audio playback finished');
-        return;
-    }
-    
-    const chunk = audioChunks.shift();
-    console.log('Playing audio chunk with', chunk.length, 'samples');
-    
-    try {
-        // Create audio buffer with the correct sample rate (44100Hz)
-        const buffer = audioContext.createBuffer(1, chunk.length, 44100);
-        buffer.copyToChannel(chunk, 0);
-
-        // Create and configure audio source
+        const buffer = audioContext.createBuffer(1,float32Arr.length,44100);
+        buffer.copyToChannel(float32Arr,0);
         const source = audioContext.createBufferSource();
         source.buffer = buffer;
-        const gainNode = audioContext.createGain();
-        source.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-        
-        // Schedule playback
+        source.connect(audioContext.destination);
+
         const now = audioContext.currentTime;
-        if (playheadTime < now || playheadTime===0) {
-            playheadTime = now + 0.05; // Add a small delay if needed
+        if(playheadTime< now + 0.15){
+            playheadTime = now + 0.15;
         }
-        gainNode.gain.setValueAtTime(0.01,playheadTime)
-        gainNode.gain.exponentialRampToValueAtTime(1.0,playheadTime+0.01);
         source.start(playheadTime);
-        const nextChunkStartTime = playheadTime + buffer.duration - 0.02; 
         playheadTime += buffer.duration;
-        
-        console.log('Scheduled audio chunk to play at', playheadTime - buffer.duration, 
-                   'for', buffer.duration.toFixed(3), 'seconds');
-        
-        // Schedule next chunk when this one finishes
-        source.onended = () => {
-            console.log('Audio chunk finished playing');
-            setTimeout(() => {
-                playNextChunk();
-            }, 10);
-        };
-        
-    } catch (error) {
-        console.error('Error playing audio chunk:', error);
+    } catch(error) {
+        console.error("Error in playAudioChunk:", error);
         isPlayingAudio = false;
     }
 }
