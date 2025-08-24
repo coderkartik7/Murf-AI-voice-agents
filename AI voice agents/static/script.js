@@ -6,7 +6,6 @@ let processor = null;
 let source = null;
 let stream = null;
 let audioChunks = [];
-let audioBufferSize = 10;
 let isPlayingAudio = false;
 let isBuffering = true;
 let playheadTime = 0;
